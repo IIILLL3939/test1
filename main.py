@@ -1,9 +1,10 @@
 import streamlit as st
 import time
 import datetime
-import fitz  # PyMuPDF: PDF를 이미지로 변환하여 학교 차단 방지
+import fitz  # PyMuPDF: PDF를 이미지로 변환
 from PIL import Image
 import io
+from streamlit_drawable_canvas import st_canvas
 
 # 페이지 기본 설정
 st.set_page_config(
@@ -39,25 +40,22 @@ PRESETS = {
 def get_default_scores(subject, num_questions):
     scores = {}
     if subject == "수학" and num_questions == 30:
-        # 수학 수능 표준 배점 (2점, 3점, 4점 자동 배치)
         for q in range(1, 31):
             if q in [1, 2, 23]:
                 scores[q] = 2
             elif q in [3, 4, 5, 6, 7, 8, 16, 17, 18, 19, 24, 25, 26, 27]:
                 scores[q] = 3
-            else:  # 9~15, 20~22, 28~30 (킬러/준킬러 문항)
+            else:
                 scores[q] = 4
     elif subject == "국어" and num_questions == 45:
-        # 국어 기본 2점 (일부 3점 문항은 채점 시 변경 가능)
         for q in range(1, 46):
             scores[q] = 3 if q in [5, 11, 17, 20, 25, 28, 33, 38, 41, 45] else 2
     else:
-        # 기타 과목 기본 2점 균일 배점
         for q in range(1, num_questions + 1):
             scores[q] = 2
     return scores
 
-# PDF 파일을 PNG 이미지 리스트로 변환 (학교 크롬 네트워크 차단 회피)
+# PDF 파일을 PNG 이미지 리스트로 변환
 def convert_pdf_to_images(pdf_bytes):
     images = []
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -137,7 +135,7 @@ else:
         uploaded_file = st.file_uploader("PDF 파일만 업로드할 수 있습니다.", type=["pdf"])
         
         if uploaded_file is not None:
-            with st.spinner("학교 차단 방지를 위해 PDF를 이미지로 변환 중입니다..."):
+            with st.spinner("PDF를 터치 필기용 이미지로 변환 중입니다..."):
                 pdf_bytes = uploaded_file.getvalue()
                 images = convert_pdf_to_images(pdf_bytes)
                 
@@ -145,7 +143,7 @@ else:
                 note_data["pdf_name"] = uploaded_file.name
                 note_data["pdf_images"] = images
                 
-            st.success("PDF 업로드 및 이미지 변환이 완료되었습니다!")
+            st.success("PDF 업로드 및 필기 환경 준비가 완료되었습니다!")
             st.rerun()
 
     else:
@@ -166,7 +164,7 @@ else:
                 with col2:
                     st.write("📄 **업로드된 파일**: ", note_data["pdf_name"])
                     st.write("📑 **총 페이지 수**: ", len(note_data["pdf_images"]), "페이지")
-                    st.info("💡 선택한 과목의 수능 표준 문항별 배점(2점, 3점, 4점)이 자동 설정됩니다.")
+                    st.info("💡 모바일/태블릿에서 터치 펜 필기 캔버스가 제공됩니다.")
                 
                 if st.button("🚀 시험 시작하기", type="primary", use_container_width=True):
                     note_data["subject"] = preset_choice
@@ -179,7 +177,7 @@ else:
                     st.rerun()
 
         # -----------------------------------------------------------------------------
-        # 3. 시험 진행 중 (타이머, 시험지, OMR)
+        # 3. 시험 진행 중 (타이머, 모바일 필기 캔버스, OMR)
         # -----------------------------------------------------------------------------
         if st.session_state.test_status in ["running", "paused"]:
             timer_col, btn_col1, btn_col2 = st.columns([3, 2, 2])
@@ -214,9 +212,43 @@ else:
             left_col, right_col = st.columns([3, 2])
 
             with left_col:
-                st.subheader("📖 시험지")
-                for idx, img in enumerate(note_data["pdf_images"]):
-                    st.image(img, caption=f"페이지 {idx + 1}", use_container_width=True)
+                st.subheader("📝 시험지 터치 필기 노트")
+                
+                # 펜 도구 설정 바
+                tool_col1, tool_col2, tool_col3 = st.columns(3)
+                with tool_col1:
+                    drawing_mode = st.selectbox("도구 선택", ["freedraw", "transform"], format_func=lambda x: "🖊️ 펜 필기" if x == "freedraw" else "✋ 이동/선택")
+                with tool_col2:
+                    stroke_color = st.color_picker("펜 색상", "#FF0000")
+                with tool_col3:
+                    stroke_width = st.slider("펜 두께", 1, 10, 2)
+
+                # 페이지 이동 탭/선택
+                total_pages = len(note_data["pdf_images"])
+                page_idx = st.number_input("페이지 선택", min_value=1, max_value=total_pages, value=1) - 1
+                
+                target_img = note_data["pdf_images"][page_idx]
+                
+                # 이미지 너비/높이에 맞춰 캔버스 생성
+                img_width, img_height = target_img.size
+                
+                # 모바일 화면 비율에 맞춰 캔버스 너비 조정 (최대 700px)
+                canvas_width = min(700, img_width)
+                aspect_ratio = img_height / img_width
+                canvas_height = int(canvas_width * aspect_ratio)
+
+                # 터치 필기 캔버스 렌더링
+                st_canvas(
+                    fill_color="rgba(255, 165, 0, 0.3)",
+                    stroke_width=stroke_width,
+                    stroke_color=stroke_color,
+                    background_image=target_img,
+                    update_streamlit=True,
+                    height=canvas_height,
+                    width=canvas_width,
+                    drawing_mode=drawing_mode,
+                    key=f"canvas_p_{page_idx}_{current_id}"
+                )
 
             with right_col:
                 show_omr = st.toggle("📝 OMR 카드 펼치기/접기", value=True)
@@ -246,12 +278,11 @@ else:
                 st.rerun()
 
         # -----------------------------------------------------------------------------
-        # 4. 시험 종료 및 자동 채점 (기본 배점 자동 적용)
+        # 4. 시험 종료 및 자동 채점
         # -----------------------------------------------------------------------------
         if st.session_state.test_status == "finished":
-            st.success("🎉 시험이 완료되었습니다! 선택한 과목의 **기본 배점이 자동 설정**되었습니다. 필요 시 수정 후 채점하세요.")
+            st.success("🎉 시험이 완료되었습니다! 선택한 과목의 **기본 배점이 자동 설정**되었습니다.")
             
-            # 과목별 기본 배점 자동 로드
             default_scores = get_default_scores(note_data["subject"], note_data["num_questions"])
             
             st.subheader("✏️ 정답 및 배점 확인/수정")
@@ -266,8 +297,6 @@ else:
                     with grading_cols[col_idx]:
                         st.write(f"**{q}번 문항** (마킹 답: **{st.session_state.user_answers.get(q, '미제출')}**)")
                         ans = st.number_input(f"{q}번 정답", min_value=1, max_value=5, value=1, key=f"ans_{q}")
-                        
-                        # 자동 설정된 기본 배점값을 value로 들어감
                         score = st.number_input(
                             f"{q}번 배점", 
                             min_value=1, 
