@@ -2,6 +2,7 @@ import streamlit as st
 import time
 import datetime
 import json
+import base64
 
 # 페이지 기본 설정
 st.set_page_config(
@@ -170,15 +171,17 @@ else:
             with left_col:
                 st.subheader("📖 시험지")
                 # PDF 미리보기 (브라우저 기본 PDF 뷰어 사용)
+                # 기존의 base64 iframe 코드 대신 아래의 object 태그 방식으로 교체합니다.
                 pdf_bytes = note_data["pdf_file"].getvalue()
                 st.download_button("💾 PDF 파일 다운로드", data=pdf_bytes, file_name=note_data["pdf_file"].name)
-                
-                # HTML embed 태그로 PDF 표시
-                import base64
-                base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
-                pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="700" type="application/pdf"></iframe>'
-                st.markdown(pdf_display, unsafe_allow_html=True)
 
+# base64 대신 bytes 데이터를 직접 활용하는 object 태그 사용
+                base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
+                pdf_display = f'''
+                    <object data="data:application/pdf;base64,{base64_pdf}" type="application/pdf" width="100%" height="700px">
+                    <p>PDF를 불러올 수 없습니다. <a href="data:application/pdf;base64,{base64_pdf}" download="{note_data['pdf_file'].name}">여기</a>를 눌러 다운로드하세요.</p>
+                    </object>'''
+                st.markdown(pdf_display, unsafe_allow_html=True)
             with right_col:
                 show_omr = st.toggle("📝 OMR 카드 펼치기/접기", value=True)
                 
