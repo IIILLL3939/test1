@@ -352,7 +352,7 @@ else:
             st.subheader("🤖 Google GenAI 답지 자동 추출 (선택)")
             st.caption("답지/해설지 사진을 올리면 AI가 정답과 배점을 자동으로 추출해 아래 표에 입력해 줍니다.")
             
-            ans_img_file = st.file_uploader("답지 이미지 파일 업로드 (PNG, JPG)", type=["png", "jpg", "jpeg"])
+            ans_img_file = st.file_uploader("답지 이미지 파일 업로드 (PNG, JPG, PDF)", type=["png", "jpg", "jpeg","pdf"])
             extracted_data = None
             
             if ans_img_file is not None:
