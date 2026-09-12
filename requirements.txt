@@ -2,3 +2,4 @@ streamlit
 google-genai
 PyMuPDF
 Pillow
+streamlit-drawable-canvas
