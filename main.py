@@ -1,10 +1,12 @@
 import streamlit as st
 import time
 import datetime
-import fitz  # PyMuPDF: PDF를 이미지로 변환
+import fitz  # PyMuPDF
 from PIL import Image
 import io
+import json
 from streamlit_drawable_canvas import st_canvas
+from google import genai
 
 # 페이지 기본 설정
 st.set_page_config(
@@ -19,7 +21,7 @@ if "notes" not in st.session_state:
 if "current_note_id" not in st.session_state:
     st.session_state.current_note_id = None
 if "test_status" not in st.session_state:
-    st.session_state.test_status = "idle"  # idle, running, paused, finished
+    st.session_state.test_status = "idle"
 if "start_time" not in st.session_state:
     st.session_state.start_time = None
 if "elapsed_time" not in st.session_state:
@@ -27,7 +29,6 @@ if "elapsed_time" not in st.session_state:
 if "user_answers" not in st.session_state:
     st.session_state.user_answers = {}
 
-# 과목별 기본 프레임워크 (문항 수, 시험 시간)
 PRESETS = {
     "국어": {"num_questions": 45, "time_limit": 80},
     "수학": {"num_questions": 30, "time_limit": 100},
@@ -36,7 +37,7 @@ PRESETS = {
     "직접 설정": {"num_questions": 20, "time_limit": 30}
 }
 
-# 과목별 수능 표준 기본 배점 생성 함수
+# 기본 배점 설정 함수
 def get_default_scores(subject, num_questions):
     scores = {}
     if subject == "수학" and num_questions == 30:
@@ -55,7 +56,17 @@ def get_default_scores(subject, num_questions):
             scores[q] = 2
     return scores
 
-# PDF 파일을 PNG 이미지 리스트로 변환
+# 기본 문항 유형(객관식/주관식) 설정 함수 (수학 16-21, 29-30 주관식)
+def get_default_q_types(subject, num_questions):
+    q_types = {}
+    for q in range(1, num_questions + 1):
+        if subject == "수학" and q in [16, 17, 18, 19, 20, 21, 29, 30]:
+            q_types[q] = "주관식"
+        else:
+            q_types[q] = "객관식"
+    return q_types
+
+# PDF를 이미지로 변환
 def convert_pdf_to_images(pdf_bytes):
     images = []
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -66,16 +77,47 @@ def convert_pdf_to_images(pdf_bytes):
         images.append(img)
     return images
 
+# Google GenAI를 이용한 답지 파싱 함수
+def extract_answers_from_image(image_bytes, num_questions, api_key):
+    try:
+        client = genai.Client(api_key=api_key)
+        pil_img = Image.open(io.BytesIO(image_bytes))
+        
+        prompt = f"""
+        이 이미지에서 모의고사 정답과 배점을 읽어서 JSON 형식으로만 응답해줘.
+        1번부터 {num_questions}번까지의 문항 정답(answer)과 배점(score)을 추출해줘.
+        정답이 주관식 숫자면 숫자로, 객관식이면 1~5 사이의 숫자로 적어줘.
+        응답 형식 예시:
+        {{
+          "1": {{"answer": 3, "score": 2}},
+          "2": {{"answer": 12, "score": 3}}
+        }}
+        다른 설명 없이 오직 JSON 텍스트만 출력해줘.
+        """
+        
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=[pil_img, prompt]
+        )
+        
+        res_text = response.text.strip().replace("```json", "").replace("```", "")
+        return json.loads(res_text)
+    except Exception as e:
+        st.error(f"GenAI 답안 추출 중 오류 발생: {e}")
+        return None
+
 # -----------------------------------------------------------------------------
-# 사이드바: 노트 관리
+# 사이드바: 노트 관리 & API Key 설정
 # -----------------------------------------------------------------------------
 st.sidebar.title("📚 시험 노트 관리")
+
+api_key = st.sidebar.text_input("🔑 Google Gemini API Key", type="password", help="답지 자동 추출 기능을 위해 필요합니다.")
 
 menu = st.sidebar.radio("메뉴 선택", ["새 노트 생성", "기존 노트 열기"])
 
 if menu == "새 노트 생성":
     st.sidebar.subheader("➕ 새 시험 노트")
-    note_name = st.sidebar.text_input("노트 이름 (예: 2026학년도 6월 모의고사 국어)")
+    note_name = st.sidebar.text_input("노트 이름 (예: 2026학년도 6월 모의고사 수학)")
     
     if st.sidebar.button("노트 생성 시작"):
         if note_name:
@@ -87,6 +129,7 @@ if menu == "새 노트 생성":
                 "subject": "국어",
                 "num_questions": 45,
                 "time_limit": 80,
+                "q_types": {},
                 "created_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
                 "result": None
             }
@@ -147,9 +190,9 @@ else:
             st.rerun()
 
     else:
-        # 2. 과목 선택 및 시험 상세 설정 단계
+        # 2. 시험 상세 설정 및 문항 유형(객관식/주관식) 지정 단계
         if st.session_state.test_status == "idle":
-            with st.expander("⚙️ 시험 과목/배점 프리셋 설정", expanded=True):
+            with st.expander("⚙️ 시험 과목 및 문항 유형 설정", expanded=True):
                 preset_choice = st.selectbox("과목 프리셋 선택", list(PRESETS.keys()))
                 
                 col1, col2 = st.columns(2)
@@ -164,20 +207,40 @@ else:
                 with col2:
                     st.write("📄 **업로드된 파일**: ", note_data["pdf_name"])
                     st.write("📑 **총 페이지 수**: ", len(note_data["pdf_images"]), "페이지")
-                    st.info("💡 모바일/태블릿에서 터치 펜 필기 캔버스가 제공됩니다.")
+                
+                st.divider()
+                st.write("📋 **문항별 유형 설정 (객관식 / 주관식)**")
+                st.caption("수학 프리셋 선택 시 16~21, 29~30번이 자동으로 주관식 세팅됩니다.")
+                
+                # 기본 유형 가져오기
+                default_types = get_default_q_types(preset_choice, num_q)
+                
+                # 문항별 유형 설정 UI
+                type_cols = st.columns(5)
+                configured_types = {}
+                for q in range(1, num_q + 1):
+                    c_idx = (q - 1) % 5
+                    with type_cols[c_idx]:
+                        configured_types[q] = st.selectbox(
+                            f"{q}번 유형",
+                            ["객관식", "주관식"],
+                            index=0 if default_types.get(q, "객관식") == "객관식" else 1,
+                            key=f"type_select_{q}"
+                        )
                 
                 if st.button("🚀 시험 시작하기", type="primary", use_container_width=True):
                     note_data["subject"] = preset_choice
                     note_data["num_questions"] = num_q
                     note_data["time_limit"] = time_l
+                    note_data["q_types"] = configured_types
                     st.session_state.test_status = "running"
                     st.session_state.start_time = time.time()
                     st.session_state.elapsed_time = 0
-                    st.session_state.user_answers = {q: 1 for q in range(1, num_q + 1)}
+                    st.session_state.user_answers = {}
                     st.rerun()
 
         # -----------------------------------------------------------------------------
-        # 3. 시험 진행 중 (타이머, 모바일 필기 캔버스, OMR)
+        # 3. 시험 진행 중 (타이머, 필기 캔버스, OMR)
         # -----------------------------------------------------------------------------
         if st.session_state.test_status in ["running", "paused"]:
             timer_col, btn_col1, btn_col2 = st.columns([3, 2, 2])
@@ -214,7 +277,6 @@ else:
             with left_col:
                 st.subheader("📝 시험지 터치 필기 노트")
                 
-                # 펜 도구 설정 바
                 tool_col1, tool_col2, tool_col3 = st.columns(3)
                 with tool_col1:
                     drawing_mode = st.selectbox("도구 선택", ["freedraw", "transform"], format_func=lambda x: "🖊️ 펜 필기" if x == "freedraw" else "✋ 이동/선택")
@@ -223,21 +285,15 @@ else:
                 with tool_col3:
                     stroke_width = st.slider("펜 두께", 1, 10, 2)
 
-                # 페이지 이동 탭/선택
                 total_pages = len(note_data["pdf_images"])
                 page_idx = st.number_input("페이지 선택", min_value=1, max_value=total_pages, value=1) - 1
                 
                 target_img = note_data["pdf_images"][page_idx]
-                
-                # 이미지 너비/높이에 맞춰 캔버스 생성
                 img_width, img_height = target_img.size
-                
-                # 모바일 화면 비율에 맞춰 캔버스 너비 조정 (최대 700px)
                 canvas_width = min(700, img_width)
                 aspect_ratio = img_height / img_width
                 canvas_height = int(canvas_width * aspect_ratio)
 
-                # 터치 필기 캔버스 렌더링
                 st_canvas(
                     fill_color="rgba(255, 165, 0, 0.3)",
                     stroke_width=stroke_width,
@@ -255,17 +311,26 @@ else:
                 
                 if show_omr:
                     st.subheader("📋 OMR 답안지")
-                    st.caption("답안을 선택하세요 (자동 저장됨)")
+                    st.caption("객관식은 선택, 주관식은 숫자를 직접 입력하세요.")
                     
                     with st.container(height=600):
                         for q in range(1, note_data["num_questions"] + 1):
-                            st.session_state.user_answers[q] = st.radio(
-                                f"**{q}번 문항**",
-                                [1, 2, 3, 4, 5],
-                                key=f"omr_q_{q}",
-                                horizontal=True,
-                                index=st.session_state.user_answers.get(q, 1) - 1
-                            )
+                            q_type = note_data["q_types"].get(q, "객관식")
+                            
+                            if q_type == "객관식":
+                                st.session_state.user_answers[q] = st.radio(
+                                    f"**{q}번 문항 (객관식)**",
+                                    [1, 2, 3, 4, 5],
+                                    key=f"omr_q_{q}",
+                                    horizontal=True,
+                                    index=int(st.session_state.user_answers.get(q, 1)) - 1
+                                )
+                            else:
+                                st.session_state.user_answers[q] = st.text_input(
+                                    f"**{q}번 문항 (주관식 정수 입력)**",
+                                    value=str(st.session_state.user_answers.get(q, "")),
+                                    key=f"omr_q_{q}"
+                                )
 
             if remaining_seconds <= 0 and st.session_state.test_status == "running":
                 st.session_state.test_status = "finished"
@@ -278,14 +343,36 @@ else:
                 st.rerun()
 
         # -----------------------------------------------------------------------------
-        # 4. 시험 종료 및 자동 채점
+        # 4. 시험 종료 및 자동 채점 (Google GenAI 자동 답안 추출 지원)
         # -----------------------------------------------------------------------------
         if st.session_state.test_status == "finished":
-            st.success("🎉 시험이 완료되었습니다! 선택한 과목의 **기본 배점이 자동 설정**되었습니다.")
+            st.success("🎉 시험이 완료되었습니다!")
+            
+            # 1. Google GenAI 답지 추출 기능
+            st.subheader("🤖 Google GenAI 답지 자동 추출 (선택)")
+            st.caption("답지/해설지 사진을 올리면 AI가 정답과 배점을 자동으로 추출해 아래 표에 입력해 줍니다.")
+            
+            ans_img_file = st.file_uploader("답지 이미지 파일 업로드 (PNG, JPG)", type=["png", "jpg", "jpeg"])
+            extracted_data = None
+            
+            if ans_img_file is not None:
+                if not api_key:
+                    st.warning("⚠️ 왼쪽 사이드바에 Google Gemini API Key를 입력해야 자동 추출 기능을 사용할 수 있습니다.")
+                else:
+                    if st.button("✨ 답지 이미지에서 정답 추출하기"):
+                        with st.spinner("Gemini AI가 답지를 읽고 있습니다..."):
+                            extracted_data = extract_answers_from_image(
+                                ans_img_file.getvalue(),
+                                note_data["num_questions"],
+                                api_key
+                            )
+                            if extracted_data:
+                                st.success("정답 추출 성공! 아래 입력 창에 자동 입력되었습니다.")
+
+            st.divider()
+            st.subheader("✏️ 정답 및 배점 확인/입력 (직접 숫자 입력 방식)")
             
             default_scores = get_default_scores(note_data["subject"], note_data["num_questions"])
-            
-            st.subheader("✏️ 정답 및 배점 확인/수정")
             
             with st.form("grading_form"):
                 grading_cols = st.columns(3)
@@ -294,19 +381,30 @@ else:
                 
                 for q in range(1, note_data["num_questions"] + 1):
                     col_idx = (q - 1) % 3
+                    
+                    # GenAI 추출 데이터가 있을 경우 우선 적용
+                    ai_ans = None
+                    ai_score = None
+                    if extracted_data and str(q) in extracted_data:
+                        ai_ans = extracted_data[str(q)].get("answer")
+                        ai_score = extracted_data[str(q)].get("score")
+                    
                     with grading_cols[col_idx]:
-                        st.write(f"**{q}번 문항** (마킹 답: **{st.session_state.user_answers.get(q, '미제출')}**)")
-                        ans = st.number_input(f"{q}번 정답", min_value=1, max_value=5, value=1, key=f"ans_{q}")
-                        score = st.number_input(
-                            f"{q}번 배점", 
-                            min_value=1, 
-                            max_value=10, 
-                            value=default_scores.get(q, 2), 
-                            key=f"score_{q}"
-                        )
+                        u_ans_display = st.session_state.user_answers.get(q, '미제출')
+                        st.write(f"**{q}번 ({note_data['q_types'].get(q, '객관식')})** [마킹: {u_ans_display}]")
                         
-                        official_answers[q] = ans
-                        question_scores[q] = score
+                        # 직접 입력(st.text_input) 방식으로 + - 버튼 제거
+                        default_ans = str(ai_ans) if ai_ans is not None else ("1" if note_data['q_types'].get(q) == "객관식" else "")
+                        ans_val = st.text_input(f"{q}번 정답", value=default_ans, key=f"ans_input_{q}")
+                        
+                        default_score = str(ai_score) if ai_score is not None else str(default_scores.get(q, 2))
+                        score_val = st.text_input(f"{q}번 배점", value=default_score, key=f"score_input_{q}")
+                        
+                        official_answers[q] = ans_val.strip()
+                        try:
+                            question_scores[q] = int(score_val.strip())
+                        except ValueError:
+                            question_scores[q] = 2  # 숫자 변환 실패 시 기본 2점
                 
                 submit_grade = st.form_submit_button("📊 채점하기", type="primary", use_container_width=True)
             
@@ -316,14 +414,15 @@ else:
                 wrong_questions = []
 
                 for q in range(1, note_data["num_questions"] + 1):
-                    u_ans = st.session_state.user_answers.get(q)
-                    o_ans = official_answers[q]
-                    if u_ans == o_ans:
+                    u_ans = str(st.session_state.user_answers.get(q, "")).strip()
+                    o_ans = str(official_answers[q]).strip()
+                    
+                    if u_ans == o_ans and u_ans != "":
                         user_score += question_scores[q]
                     else:
                         wrong_questions.append({
                             "no": q,
-                            "user_ans": u_ans,
+                            "user_ans": u_ans if u_ans != "" else "미제출",
                             "correct_ans": o_ans,
                             "score": question_scores[q]
                         })
@@ -351,7 +450,7 @@ else:
                         st.success("👏 축하합니다! 만점입니다.")
                     else:
                         for w in res["wrong_questions"]:
-                            st.error(f"**{w['no']}번** (내가 찍은 답: {w['user_ans']} / 정답: {w['correct_ans']}) - [{w['score']}점 차감]")
+                            st.error(f"**{w['no']}번** (내 답: {w['user_ans']} / 정답: {w['correct_ans']}) - [{w['score']}점 차감]")
 
                 with res_col2:
                     st.subheader("📷 오답 노트 및 문제 캡처")
